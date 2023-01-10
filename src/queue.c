@@ -1,20 +1,26 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
-#include "queue.h"
+#include <stdbool.h>
+#include "../includes/queue.h"
 
-static struct queue_t
+struct queue_t
 {
     int front;
     int rear;
     int * array;
-    pthread_mutex_t lock;
     size_t size;
+    size_t capacity;
 };
 
 
 
-// create the queue to hold file descriptors.
+/**
+ * @brief Create a queue object
+ * 
+ * @param number 
+ * @return queue_t* 
+ */
 queue_t * create_queue(int number)
 {
     if (number == 0 || number < 0)
@@ -22,59 +28,130 @@ queue_t * create_queue(int number)
         fprintf(stderr, "Cannot create queue with 0 or > 0 objects.\n");
         return NULL;
     }
-
+    // Allocate memory for a queue structure.
     queue_t * queue = calloc(1, sizeof(queue_t));
     if (NULL == queue)
     {
         fprintf(stderr, "Cannot allocate memory for queue.\n");
         return NULL;
     }
-    queue->size = number;
+    // Capacity is the maximum number of numbers that may be held in the queue.
+    queue->capacity = number;
+    // There is no values so the Head is the tail
     queue->front = queue->rear;
-    queue->array = calloc(number, (number * sizeof(int)));
-    if (0 != pthread_mutex_init(&queue->lock, NULL))
-    {
-        fprintf(stderr, "Mutex lock failed to create for queue.\n");
-        free(queue);
-        return NULL;
-    }
+    // Allocate an array of integers that are saved on the heap
+    queue->array = calloc(number,  sizeof(int));
     if (NULL == queue->array)
     {
         fprintf(stderr, "Cannot allocate memory for file descriptors.\n");
         free(queue);
         return NULL;
     }
-
     return queue;
 }
 
-// destroy the queue
+/**
+ * @brief Static function to check if the queue is empty or not.
+ * 
+ * @param queue 
+ * @param boolean 
+ * @return int 
+ */
+static int is_queue_empty(queue_t * queue, bool * boolean)
+{
+    int ret_val = EXIT_FAILURE;
+    if (NULL == queue || NULL == boolean)
+    {
+        fprintf(stderr, "NULL pointer given in %s.\n", __func__);
+        goto EXIT;
+    }
+    *boolean = queue->size == 0 ? true : false;
+    ret_val = EXIT_SUCCESS;
+    EXIT:
+        return ret_val;
+}
+
+/**
+ * @brief Destroy queue object and free all memory. Return 1 on failure, 0 on success.
+ * 
+ * @param queue 
+ * @return int 
+ */
 int destroy_queue(queue_t * queue)
 {
     // Set the error code to failure
     int retval = EXIT_FAILURE;
     // If the array is NULL, return Error as cannot destory properly. We check before destroying anything.
-    if (NULL == queue || NULL == queue->array)
+    if (NULL == queue)
     {
         fprintf(stderr, "Cannot destroy NULL queue.\n");
         goto EXIT;
     }
-    
-    // If the mutex lock cannot be destroyed, return error code because structure cannot be destroyed properly.
-    if (0 != pthread_mutex_destroy(&queue->lock))
-    {
-        fprintf(stderr, "Failed to destory mutex lock in queue.\n");
-        goto EXIT;
-    }
-    // Free after everthing has been checked if it can be destroyed. If start destroying and run into issues can raise more issues
-    // Free file descriptor array after mutex lock
-    FREE_ARRAY:
-        free(queue->array);
-        queue->array = NULL;
     // Free structure last.
     FREE_STRUCT:
+        free(queue->array);
         free(queue);
         queue = NULL;
+    retval = EXIT_SUCCESS;
+    EXIT:
+        return retval;
+}
+
+/**
+ * @brief Check that the queue is not full. Return 1 for failure, 0 on success. 
+ * 
+ * @param queue 
+ * @param truth pointer to bool
+ * @return int 
+ */
+int is_queue_full(queue_t * queue, bool * truth)
+{
+    // In this case it is expected to be a true or false, so the error value will be the INT32 Max;
+    int retval = EXIT_FAILURE;
+    if (NULL == queue || NULL == truth)
+    {
+        fprintf(stderr, "Failed %s, with NULL pointer.\n", __func__);
+        goto EXIT;
+    }
+    *truth = (queue->size == queue->capacity) ? true : false;
+    retval = EXIT_SUCCESS;
+    EXIT:
+        return retval;
+}
+
+/**
+ * @brief Enqueue integer into queue. Overflow is checked. return 1 on error, 0 on success.
+ * 
+ * @param queue 
+ * @param number 
+ * @return int 
+ */
+int enqueue(queue_t * queue, int number)
+{
+    int retval = EXIT_FAILURE;
+    bool is_full = false;
+    // Check pointer
+    if (NULL == queue)
+    {
+        fprintf(stderr, "Cannot enqueue with null queue.\n");
+        goto EXIT;
+    }
+    // Ensure queue has room, if is full, then there is no room and print overfull.
+    is_queue_full(queue, &is_full);
+    if (true == is_full)
+    {
+        fprintf(stderr, "Queue overflow.\n");
+        goto EXIT;
+    }
+    // Set the rear to the number.
+    queue->array[queue->rear] = number;
+    // Increase the rear by 1. Modulo to catch overflow.
+    queue->rear = (queue->rear + 1) % queue->capacity;
+    #ifdef DEBUG 
+        printf("Rear: %d\n", queue->rear);
+    #endif
+    // Increase size.
+    queue->size++;
     retval = EXIT_SUCCESS;
 
     EXIT:
@@ -82,71 +159,84 @@ int destroy_queue(queue_t * queue)
 }
 
 /**
- * @brief Check that the queue is not full. Return INT32_MAX on error, else 1 for True and 0 for False. This is a thread locking function.
+ * @brief Dequeue item from the queue and return item. Pass pointer for error check, 1 for failure, 0 for success.
  * 
  * @param queue 
  * @return int 
  */
-int is_queue_full(queue_t * queue)
+int dequeue(queue_t * queue, int * error)
 {
-    // In this case it is expected to be a true or false, so the error value will be the INT32 Max;
-    int retval = __INT32_MAX__;
-    if (0 != pthread_mutex_lock(&queue->lock))
-    {
-        fprintf(stderr, "Failed mutex lock in %s\n", __func__);
-        goto EXIT;
-    }
+    int ret_val = EXIT_FAILURE;
+    *error = EXIT_FAILURE;
     if (NULL == queue)
     {
-        fprintf(stderr, "Failed %s, with NULL pointer.\n", __func__);
+        fprintf(stderr, "Cannot dequeue NULL value.\n");
         goto EXIT;
     }
-    retval = (((queue->rear + 1) % queue->size) == queue->front) ? 1 : 0;
-    pthread_mutex_unlock(&queue->lock);
-
+    bool is_empty = true;
+    is_queue_empty(queue, &is_empty);
+    if (is_empty)
+    {
+        fprintf(stderr, "Cannot dequeue on empty queue.\n");
+        goto EXIT;
+    }
+    #ifdef DEBUG
+        printf("%d ", queue->array[queue->front]);
+    #endif
+    // set the return value to the front of the queue.
+    ret_val = queue->array[queue->front];
+    // set the new front to the next in line.
+    queue->front = (queue->front + 1) % queue->capacity;
+    // Decrease Size.
+    queue->size--;
+    *error = EXIT_SUCCESS;
+    
     EXIT:
-        return retval;
+        return ret_val;
 }
 
-// Enqueue
-int enqueue(queue_t * queue, int number)
+
+
+/**
+ * @brief Give reference to the queue size. Return 1 on error, or 0 on sucess.
+ * 
+ * @param queue 
+ * @param size 
+ * @return int 
+ */
+int queue_size(queue_t * queue, int * size)
 {
-    int retval = 1;
-    if (NULL == queue)
+    int ret_val = EXIT_FAILURE;
+    if (NULL == queue || NULL == size)
     {
-        fprintf(stderr, "Cannot enqueue with null queue.\n");
+        fprintf(stderr, "Cannot find size of NULL value in %s.\n", __func__);
         goto EXIT;
     }
-    if (1 == is_queue_full(queue))
-    {
-        fprintf(stderr, "Queue overflow.\n");
-        goto EXIT;
-    }
-    if (0 != pthread_mutex_lock(&queue->lock))
-    {
-        fprintf(stderr, "Failed to lock during enqueue.\n");
-        goto EXIT;
-    }
-    queue->rear = (queue->rear + 1) % queue->size;
-    queue->array[queue->rear] = number;
-    if (-1 == queue->front)
-    {
-        queue->front = queue->rear;
-    }
-    retval = 0;
-    pthread_mutex_unlock(&queue->lock);
-
+    *size = queue->size;
+    ret_val = EXIT_SUCCESS;
     EXIT:
-        return retval;
+        return ret_val;
 }
 
-//Dequeue
+/**
+ * @brief Give reference to the first item in the queue. Return 1 on error, or 0 on success.
+ * 
+ * @param q 
+ * @param num 
+ * @return int 
+ */
+int front_item(queue_t * q, int * num)
+{
+    int ret_val = EXIT_FAILURE;
+    if (NULL == q || NULL == num)
+    {
+        fprintf(stderr, "Cannot find head in %s.\n", __func__);
+        goto EXIT;
+    }
+    *num = q->array[q->front];
+    ret_val = EXIT_SUCCESS;
 
-// IsEmpty
-
-// IsFull
-
-// Queue size
-
-// Front Item
+    EXIT:
+        return ret_val;
+}
 
